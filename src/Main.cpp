@@ -1,5 +1,6 @@
 /*
- *      Copyright (C) 2007-2014 Team XBMC
+ *      Copyright (C) 2007-2014 Team Kodi
+ *      Copyright (C) 2016 Team Kodi
  *      http://kodi.tv
  *
  *  This Program is free software; you can redistribute it and/or modify
@@ -48,348 +49,189 @@ and some beat detection code was inspired by Frederic Patin @
 www.gamedev.net/reference/programming/features/beatdetection/
 --
 
-"ported" to XBMC by d4rk
+"ported" to Kodi by d4rk
 d4rk@xbmc.org
 
 */
 
-#include <xbmc_vis_dll.h>
-#include <xbmc_addon_cpp_dll.h>
-#include <libXBMC_addon.h>
+#include "Main.h"
 
+#include <kodi/api2/visualization/Addon.hpp>
 #if !defined(__APPLE__)
 #include <GL/glew.h>
 #endif
 
-#include "libprojectM/projectM.hpp"
-#include <string>
+using namespace Visualization;
 
-projectM *globalPM = NULL;
-
-// some projectm globals
-int maxSamples=512;
-int texsize=512;
-int gx=40,gy=30;
-int fps=100;
-char *disp;
-char g_visName[512];
-char **g_presets=NULL;
-unsigned int g_numPresets = 0;
-projectM::Settings g_configPM;
-
-bool g_UserPackFolder;
-char lastPresetDir[1024];
-bool lastLockStatus;
-int lastPresetIdx;
-unsigned int lastLoggedPresetIdx;
-
-ADDON::CHelper_libXBMC_addon *XBMC           = NULL;
-
-//-- Create -------------------------------------------------------------------
-// Called once when the visualisation is created by XBMC. Do any setup here.
-//-----------------------------------------------------------------------------
-extern "C" ADDON_STATUS ADDON_Create(void* hdl, void* props)
+class CVisualizationProjectM : public Visualization::CAddonInterface
 {
-  if (!props)
-    return ADDON_STATUS_UNKNOWN;
+public:
+  CVisualizationProjectM(CAddonVisualizationProjectM *addon, void* kodiInstance);
+  virtual ~CVisualizationProjectM();
 
-  if (!XBMC)
-    XBMC = new ADDON::CHelper_libXBMC_addon;
+  virtual void AudioData(const float* pAudioData, int iAudioDataLength, float* pFreqData, int iFreqDataLength);
+  virtual void Render();
+  virtual void GetInfo(Visualization::sInfo& info);
+  virtual bool OnAction(long flags, const void* param);
+  virtual bool GetPresets(std::vector<std::string>& presets);
+  virtual unsigned int GetPreset();
+  virtual bool IsLocked();
 
-  if (!XBMC->RegisterMe(hdl))
-  {
-    delete XBMC, XBMC=NULL;
-    return ADDON_STATUS_PERMANENT_FAILURE;
-  }
+  static projectM *m_projectM;
 
-  VIS_PROPS* visprops = (VIS_PROPS*)props;
+private:
+  bool InitProjectM();
+  
+  int m_maxSamples;
+  int m_texsize;
+  int m_gx, m_gy;
+  int m_fps;
 
-  strcpy(g_visName, visprops->name);
-  g_configPM.meshX = gx;
-  g_configPM.meshY = gy;
-  g_configPM.fps = fps;
-  g_configPM.textureSize = texsize;
-  g_configPM.windowWidth = visprops->width;
-  g_configPM.windowHeight = visprops->height;
-  g_configPM.aspectCorrection = true;
-  g_configPM.easterEgg = 0.0;
-  char path[1024];
-  XBMC->GetSetting("__addonpath__", path);
-  strcat(path,"/resources");
-  g_configPM.titleFontURL = path;
-  g_configPM.titleFontURL += "/Vera.ttf";
-  g_configPM.menuFontURL = path;
-  g_configPM.menuFontURL += "/VeraMono.ttf";
-  lastLoggedPresetIdx = lastPresetIdx;
+  CAddonVisualizationProjectM* m_addon;
+  unsigned int m_lastLoggedPresetIdx;
+  std::vector<std::string> m_presets;
+};
 
-  return ADDON_STATUS_NEED_SAVEDSETTINGS;
+projectM *CVisualizationProjectM::m_projectM = nullptr;
+
+CVisualizationProjectM::CVisualizationProjectM(CAddonVisualizationProjectM *addon, void* kodiInstance)
+  : Visualization::CAddonInterface(kodiInstance),
+    m_maxSamples(512),
+    m_texsize(512),
+    m_gx(40),
+    m_gy(30),
+    m_fps(100),
+    m_addon(addon)
+{
+  m_addon->m_configPM.meshX = m_gx;
+  m_addon->m_configPM.meshY = m_gy;
+  m_addon->m_configPM.fps = m_fps;
+  m_addon->m_configPM.textureSize = m_texsize;
+  m_addon->m_configPM.windowWidth = GetProperties()->width;
+  m_addon->m_configPM.windowHeight = GetProperties()->height;
+  m_addon->m_configPM.aspectCorrection = true;
+  m_addon->m_configPM.easterEgg = 0.0;
+  std::string path = GetAddonPath();
+  path += "/resources";
+  m_addon->m_configPM.titleFontURL = path;
+  m_addon->m_configPM.titleFontURL += "/Vera.ttf";
+  m_addon->m_configPM.menuFontURL = path;
+  m_addon->m_configPM.menuFontURL += "/VeraMono.ttf";
+  m_lastLoggedPresetIdx = m_addon->m_lastPresetIdx;
+
+  InitProjectM();
 }
 
-//-- Start --------------------------------------------------------------------
-// Called when a new soundtrack is played
-//-----------------------------------------------------------------------------
-extern "C" void Start(int iChannels, int iSamplesPerSec, int iBitsPerSample, const char* szSongName)
+CVisualizationProjectM::~CVisualizationProjectM()
 {
-  //printf("Got Start Command\n");
+  if (m_projectM)
+  {
+    delete m_projectM;
+    m_projectM = nullptr;
+  }
 }
 
 //-- Audiodata ----------------------------------------------------------------
-// Called by XBMC to pass new audio data to the vis
+// Called by Kodi to pass new audio data to the vis
 //-----------------------------------------------------------------------------
-extern "C" void AudioData(const float* pAudioData, int iAudioDataLength, float *pFreqData, int iFreqDataLength)
+void CVisualizationProjectM::AudioData(const float* pAudioData, int iAudioDataLength, float* pFreqData, int iFreqDataLength)
 {
-  if (globalPM)
-    globalPM->pcm()->addPCMfloat(pAudioData, iAudioDataLength);
+  if (m_projectM)
+    m_projectM->pcm()->addPCMfloat(pAudioData, iAudioDataLength); 
 }
 
 //-- Render -------------------------------------------------------------------
 // Called once per frame. Do all rendering here.
 //-----------------------------------------------------------------------------
-extern "C" void Render()
+void CVisualizationProjectM::Render() 
 {
-  if (globalPM)
+  if (m_projectM)
   {
-    globalPM->renderFrame();
-    if (g_presets)
-    {
-      unsigned preset;
-      globalPM->selectedPresetIndex(preset);
-//      if (lastLoggedPresetIdx != preset)
-//        CLog::Log(LOGDEBUG,"PROJECTM - Changed preset to: %s",g_presets[preset]);
-      lastLoggedPresetIdx = preset;
-    }
+    m_projectM->renderFrame();
+    unsigned preset;
+    m_projectM->selectedPresetIndex(preset);
+//    if (m_lastLoggedPresetIdx != preset)
+//      CLog::Log(LOGDEBUG,"PROJECTM - Changed preset to: %s",m_presets[preset]);
+    m_lastLoggedPresetIdx = preset;
   }
 }
 
 //-- GetInfo ------------------------------------------------------------------
-// Tell XBMC our requirements
+// Tell Kodi our requirements
 //-----------------------------------------------------------------------------
-extern "C" void GetInfo(VIS_INFO* pInfo)
+void CVisualizationProjectM::GetInfo(Visualization::sInfo& info) 
 {
-  pInfo->bWantsFreq = false;
-  pInfo->iSyncDelay = 0;
+  info.bWantsFreq = false;
+  info.iSyncDelay = 0;
 }
 
 //-- OnAction -----------------------------------------------------------------
-// Handle XBMC actions such as next preset, lock preset, album art changed etc
+// Handle Kodi actions such as next preset, lock preset, album art changed etc
 //-----------------------------------------------------------------------------
-extern "C" bool OnAction(long flags, const void *param)
+bool CVisualizationProjectM::OnAction(long flags, const void* param)
 {
-  bool ret = false;
-
-  if (!globalPM)
+  if (!m_projectM)
     return false;
 
-  if (flags == VIS_ACTION_LOAD_PRESET && param)
+  switch (flags)
   {
-    int pindex = *((int *)param);
-    globalPM->selectPreset(pindex);
-    ret = true;
-  }
-  else if (flags == VIS_ACTION_NEXT_PRESET)
-  {
-//    switchPreset(ALPHA_NEXT, SOFT_CUT);
-    if (!globalPM->isShuffleEnabled())
-      globalPM->key_handler(PROJECTM_KEYDOWN, PROJECTM_K_n, PROJECTM_KMOD_CAPS); //ignore PROJECTM_KMOD_CAPS
-    else
-      globalPM->key_handler(PROJECTM_KEYDOWN, PROJECTM_K_r, PROJECTM_KMOD_CAPS); //ignore PROJECTM_KMOD_CAPS
-    ret = true;
-  }
-  else if (flags == VIS_ACTION_PREV_PRESET)
-  {
-//    switchPreset(ALPHA_PREVIOUS, SOFT_CUT);
-    if (!globalPM->isShuffleEnabled())
-      globalPM->key_handler(PROJECTM_KEYDOWN, PROJECTM_K_p, PROJECTM_KMOD_CAPS); //ignore PROJECTM_KMOD_CAPS
-    else
-      globalPM->key_handler(PROJECTM_KEYDOWN, PROJECTM_K_r, PROJECTM_KMOD_CAPS); //ignore PROJECTM_KMOD_CAPS
-
-    ret = true;
-  }
-  else if (flags == VIS_ACTION_RANDOM_PRESET)
-  {
-    globalPM->setShuffleEnabled(g_configPM.shuffleEnabled);
-    ret = true;
-  }
-  else if (flags == VIS_ACTION_LOCK_PRESET)
-  {
-    globalPM->setPresetLock(!globalPM->isPresetLocked());
-    unsigned preset;
-    globalPM->selectedPresetIndex(preset);
-    globalPM->selectPreset(preset);
-    ret = true;
-  }
-  return ret;
-}
-
-//-- GetPresets ---------------------------------------------------------------
-// Return a list of presets to XBMC for display
-//-----------------------------------------------------------------------------
-extern "C" unsigned int GetPresets(char ***presets)
-{
-  g_numPresets = globalPM ? globalPM->getPlaylistSize() : 0;
-  if (g_numPresets > 0)
-  {
-    g_presets = (char**) malloc(sizeof(char*)*g_numPresets);
-    for (unsigned i = 0; i < g_numPresets; i++)
-    {
-      g_presets[i] = (char*) malloc(strlen(globalPM->getPresetName(i).c_str())+2);
-      if (g_presets[i])
-        strcpy(g_presets[i], globalPM->getPresetName(i).c_str());
-    }
-    *presets = g_presets;
-  }
-  return g_numPresets;
-}
-
-//-- GetPreset ----------------------------------------------------------------
-// Return the index of the current playing preset
-//-----------------------------------------------------------------------------
-extern "C" unsigned GetPreset()
-{
-  if (g_presets)
-  {
-    unsigned preset;
-    if(globalPM && globalPM->selectedPresetIndex(preset))
-      return preset;
-  }
-  return 0;
-}
-
-//-- IsLocked -----------------------------------------------------------------
-// Returns true if this add-on use settings
-//-----------------------------------------------------------------------------
-extern "C" bool IsLocked()
-{
-  if(globalPM)
-    return globalPM->isPresetLocked();
-  else
-    return false;
-}
-
-//-- Stop ---------------------------------------------------------------------
-// Do everything before unload of this add-on
-// !!! Add-on master function !!!
-//-----------------------------------------------------------------------------
-extern "C" void ADDON_Stop()
-{
-  if (globalPM)
-  {
-    delete globalPM;
-    globalPM = NULL;
-  }
-  if (g_presets)
-  {
-    for (unsigned i = 0; i <g_numPresets; i++)
-    {
-      free(g_presets[i]);
-    }
-    free(g_presets);
-    g_presets = NULL;
-  }
-  g_numPresets = 0;
-}
-
-//-- Destroy-------------------------------------------------------------------
-// Do everything before unload of this add-on
-// !!! Add-on master function !!!
-//-----------------------------------------------------------------------------
-extern "C" void ADDON_Destroy()
-{
-}
-
-//-- HasSettings --------------------------------------------------------------
-// Returns true if this add-on use settings
-// !!! Add-on master function !!!
-//-----------------------------------------------------------------------------
-extern "C" bool ADDON_HasSettings()
-{
-  return true;
-}
-
-//-- GetStatus ---------------------------------------------------------------
-// Returns the current Status of this visualisation
-// !!! Add-on master function !!!
-//-----------------------------------------------------------------------------
-extern "C" ADDON_STATUS ADDON_GetStatus()
-{
-  return ADDON_STATUS_OK;
-}
-
-//-- GetSettings --------------------------------------------------------------
-// Return the settings for XBMC to display
-//-----------------------------------------------------------------------------
-
-extern "C" unsigned int ADDON_GetSettings(ADDON_StructSetting ***sSet)
-{
-  return 0;
-}
-
-//-- FreeSettings --------------------------------------------------------------
-// Free the settings struct passed from XBMC
-//-----------------------------------------------------------------------------
-
-extern "C" void ADDON_FreeSettings()
-{
-}
-
-void ChooseQuality (int pvalue)
-{
-  switch (pvalue)
-  {
-    case 0:
-      g_configPM.textureSize = 256;
+    case VIS_ACTION_LOAD_PRESET:
+      if (param)
+      {
+        int pindex = *((int *)param);
+        m_projectM->selectPreset(pindex);
+        return true;
+      }
       break;
-    case 1:
-      g_configPM.textureSize = 512;
-      break;
-    case 2:
-      g_configPM.textureSize = 1024;
-      break;
-    case 3:
-      g_configPM.textureSize = 2048;
+    case VIS_ACTION_NEXT_PRESET:
+  //    switchPreset(ALPHA_NEXT, SOFT_CUT);
+      if (!m_projectM->isShuffleEnabled())
+        m_projectM->key_handler(PROJECTM_KEYDOWN, PROJECTM_K_n, PROJECTM_KMOD_CAPS); //ignore PROJECTM_KMOD_CAPS
+      else
+        m_projectM->key_handler(PROJECTM_KEYDOWN, PROJECTM_K_r, PROJECTM_KMOD_CAPS); //ignore PROJECTM_KMOD_CAPS
+      return true;
+    case VIS_ACTION_PREV_PRESET:
+  //    switchPreset(ALPHA_PREVIOUS, SOFT_CUT);
+      if (!m_projectM->isShuffleEnabled())
+        m_projectM->key_handler(PROJECTM_KEYDOWN, PROJECTM_K_p, PROJECTM_KMOD_CAPS); //ignore PROJECTM_KMOD_CAPS
+      else
+        m_projectM->key_handler(PROJECTM_KEYDOWN, PROJECTM_K_r, PROJECTM_KMOD_CAPS); //ignore PROJECTM_KMOD_CAPS
+      return true;
+    case VIS_ACTION_RANDOM_PRESET:
+      m_projectM->setShuffleEnabled(m_addon->m_configPM.shuffleEnabled);
+      return true;
+    case VIS_ACTION_LOCK_PRESET:
+      m_projectM->setPresetLock(!m_projectM->isPresetLocked());
+      unsigned preset;
+      m_projectM->selectedPresetIndex(preset);
+      m_projectM->selectPreset(preset);
+      return true;
+    default:
       break;
   }
+  return false;
 }
 
-void ChoosePresetPack(int pvalue)
+bool CVisualizationProjectM::InitProjectM()
 {
-  g_UserPackFolder = false;
-  if (pvalue == 0)
+  if (m_projectM)
   {
-    char path[1024];
-    XBMC->GetSetting("__addonpath__", path);
-    g_configPM.presetURL = path;
-    g_configPM.presetURL += "/resources/presets";
+    delete m_projectM; //We are re-initalizing the engine
+    m_projectM = nullptr;
   }
-  else if (pvalue == 1) //User preset folder has been chosen
-    g_UserPackFolder = true;
-}
-
-void ChooseUserPresetFolder(std::string pvalue)
-{
-  if (g_UserPackFolder)
-  {
-    pvalue.erase(pvalue.length()-1,1);  //Remove "/" from the end
-    g_configPM.presetURL = pvalue;
-  }
-}
-
-bool InitProjectM()
-{
-  if (globalPM) delete globalPM; //We are re-initalizing the engine
   try
   {
-    globalPM = new projectM(g_configPM);
-    if (g_configPM.presetURL == lastPresetDir)  //If it is not the first run AND if this is the same preset pack as last time
+    m_projectM = new projectM(m_addon->m_configPM);
+    if (m_addon->m_configPM.presetURL == m_addon->m_lastPresetDir)  //If it is not the first run AND if this is the same preset pack as last time
     {
-      globalPM->setPresetLock(lastLockStatus);
-      globalPM->selectPreset(lastPresetIdx);
+      m_projectM->setPresetLock(m_addon->m_lastLockStatus);
+      m_projectM->selectPreset(m_addon->m_lastLockStatus);
     }
     else
     {
-      //If it is the first run or a newly chosen preset pack we choose a random preset as first
-      if (globalPM->getPlaylistSize())
-        globalPM->selectPreset((rand() % (globalPM->getPlaylistSize())));
+      // If it is the first run or a newly chosen preset pack we choose a random preset as first
+      if (m_projectM->getPlaylistSize())
+        m_projectM->selectPreset((rand() % (m_projectM->getPlaylistSize())));
     }
     return true;
   }
@@ -400,84 +242,163 @@ bool InitProjectM()
   }
 }
 
-//-- UpdateSetting ------------------------------------------------------------
-// Handle setting change request from XBMC
-//-----------------------------------------------------------------------------
-extern "C" ADDON_STATUS ADDON_SetSetting(const char* id, const void* value)
-{
-  if (!id || !value)
-    return ADDON_STATUS_UNKNOWN;
 
-  if (strcmp(id, "###GetSavedSettings") == 0) // We have some settings to be saved in the settings.xml file
+//-- GetPresets ---------------------------------------------------------------
+// Return a list of presets to Kodi for display
+//-----------------------------------------------------------------------------
+bool CVisualizationProjectM::GetPresets(std::vector<std::string>& presets)
+{
+  unsigned int numPresets = m_projectM ? m_projectM->getPlaylistSize() : 0;
+  if (numPresets > 0)
   {
-    if (!globalPM)
+    for (unsigned i = 0; i < numPresets; i++)
+      presets.push_back(m_projectM->getPresetName(i));
+  }
+  return (numPresets > 0);
+}
+
+//-- GetPreset ----------------------------------------------------------------
+// Return the index of the current playing preset
+//-----------------------------------------------------------------------------
+unsigned int CVisualizationProjectM::GetPreset()
+{ 
+  unsigned preset;
+  if(m_projectM && m_projectM->selectedPresetIndex(preset))
+    return preset;
+  return 0;
+}
+
+//-- IsLocked -----------------------------------------------------------------
+// Returns true if this add-on use settings
+//-----------------------------------------------------------------------------
+bool CVisualizationProjectM::IsLocked()
+{
+  if(m_projectM)
+    return m_projectM->isPresetLocked();
+  else
+    return false;
+}
+
+eAddonStatus CAddonVisualizationProjectM::CreateInstance(eInstanceType instanceType, KODI_HANDLE* addonInstance, KODI_HANDLE kodiInstance)
+{
+  KodiAPI::Log(ADDON_LOG_DEBUG, "%s - Creating the Project M visualization add-on", __FUNCTION__);
+
+  if (instanceType != CAddon::instanceVisualization)
+  {
+    KodiAPI::Log(ADDON_LOG_FATAL, "%s - Creation called with unsupported instance type", __FUNCTION__);
+    return addonStatus_PERMANENT_FAILURE;
+  }
+
+  *addonInstance = new CVisualizationProjectM(this, kodiInstance);
+  return addonStatus_OK;
+}
+
+void CAddonVisualizationProjectM::DestroyInstance(KODI_HANDLE addonInstance)
+{
+  delete static_cast<CVisualizationProjectM*>(addonInstance);
+}
+
+//-- UpdateSetting ------------------------------------------------------------
+// Handle setting change request from Kodi
+//-----------------------------------------------------------------------------
+eAddonStatus CAddonVisualizationProjectM::SetSetting(std::string& settingName, const void *settingValue)
+{
+  if (settingName.empty() || settingValue == nullptr)
+    return addonStatus_UNKNOWN;
+
+  if (settingName == "###GetSavedSettings") // We have some settings to be saved in the settings.xml file
+  {
+    if (!CVisualizationProjectM::m_projectM)
     {
-      return ADDON_STATUS_UNKNOWN;
+      return addonStatus_UNKNOWN;
     }
-    if (strcmp((char*)value, "0") == 0)
+    if (strcmp((char*)settingValue, "0") == 0)
     {
-      strcpy((char*)id, "lastpresetfolder");
-      strcpy((char*)value, globalPM->settings().presetURL.c_str());
+      settingName = "lastpresetfolder";
+      strcpy((char*)settingValue, CVisualizationProjectM::m_projectM->settings().presetURL.c_str());
     }
-    if (strcmp((char*)value, "1") == 0)
+    if (strcmp((char*)settingValue, "1") == 0)
     {
-      strcpy((char*)id, "lastlockedstatus");
-      strcpy((char*)value, (globalPM->isPresetLocked() ? "true" : "false"));
+      settingName = "lastlockedstatus";
+      strcpy((char*)settingValue, (CVisualizationProjectM::m_projectM->isPresetLocked() ? "true" : "false"));
     }
-    if (strcmp((char*)value, "2") == 0)
+    if (strcmp((char*)settingValue, "2") == 0)
     {
-      strcpy((char*)id, "lastpresetidx");
+      settingName = "lastpresetidx";
       unsigned int lastindex;
-      globalPM->selectedPresetIndex(lastindex);
-      sprintf ((char*)value, "%i", (int)lastindex);
+      CVisualizationProjectM::m_projectM->selectedPresetIndex(lastindex);
+      sprintf ((char*)settingValue, "%i", (int)lastindex);
     }
-    if (strcmp((char*)value, "3") == 0)
+    if (strcmp((char*)settingValue, "3") == 0)
     {
-      strcpy((char*)id, "###End");
+      settingName = "###End";
     }
-    return ADDON_STATUS_OK;
+    return addonStatus_OK;
   }
   // It is now time to set the settings got from xmbc
-  if (strcmp(id, "quality")==0)
-    ChooseQuality (*(int*)value);
-  else if (strcmp(id, "shuffle")==0)
-    g_configPM.shuffleEnabled = *(bool*)value;
+  if (settingName == "quality")
+    ChooseQuality (*(int*)settingValue);
+  else if (settingName == "shuffle")
+    m_configPM.shuffleEnabled == *(bool*)settingValue;
   
-  else if (strcmp(id, "lastpresetidx")==0)
-    lastPresetIdx = *(int*)value;
-  else if (strcmp(id, "lastlockedstatus")==0)
-    lastLockStatus = *(bool*)value;
-  else if (strcmp(id, "lastpresetfolder")==0)
-    strcpy(lastPresetDir, (char*)value);
-  
-  else if (strcmp(id, "smooth_duration")==0)
-    g_configPM.smoothPresetDuration = (*(int*)value * 5 + 5);
-  else if (strcmp(id, "preset_duration")==0)
-    g_configPM.presetDuration = (*(int*)value * 5 + 5);
-  else if (strcmp(id, "preset pack")==0)
-    ChoosePresetPack(*(int*)value);
-  else if (strcmp(id, "user preset folder") == 0)
-    ChooseUserPresetFolder((char*)value);
-  else if (strcmp(id, "beat_sens")==0)
+  else if (settingName == "lastpresetidx")
+    m_lastPresetIdx = *(int*)settingValue;
+  else if (settingName == "lastlockedstatus")
+    m_lastLockStatus = *(bool*)settingValue;
+  else if (settingName == "lastpresetfolder")
+    m_lastPresetDir = (char*)settingValue;
+  else if (settingName == "smooth_duration")
+    m_configPM.smoothPresetDuration = (*(int*)settingValue * 5 + 5);
+  else if (settingName == "preset_duration")
+    m_configPM.presetDuration = (*(int*)settingValue * 5 + 5);
+  else if (settingName == "preset pack")
+    ChoosePresetPack(*(int*)settingValue);
+  else if (settingName == "user preset folder")
+    ChooseUserPresetFolder((char*)settingValue);
+  else if (settingName == "beat_sens")
+    m_configPM.beatSensitivity = *(int*)settingValue * 2;
+
+  return addonStatus_OK;
+}
+
+void CAddonVisualizationProjectM::ChooseQuality(int pvalue)
+{
+  switch (pvalue)
   {
-    g_configPM.beatSensitivity = *(int*)value * 2;
-    if (!InitProjectM())    //The last setting value is already set so we (re)initalize
-      return ADDON_STATUS_UNKNOWN;
+    case 0:
+      m_configPM.textureSize = 256;
+      break;
+    case 1:
+      m_configPM.textureSize = 512;
+      break;
+    case 2:
+      m_configPM.textureSize = 1024;
+      break;
+    case 3:
+      m_configPM.textureSize = 2048;
+      break;
   }
-  return ADDON_STATUS_OK;
 }
 
-//-- GetSubModules ------------------------------------------------------------
-// Return any sub modules supported by this vis
-//-----------------------------------------------------------------------------
-extern "C" unsigned int GetSubModules(char ***names)
+void CAddonVisualizationProjectM::ChoosePresetPack(int pvalue)
 {
-  return 0; // this vis supports 0 sub modules
+  m_UserPackFolder = false;
+   if (pvalue == 0)
+   {
+     m_configPM.presetURL = GetAddonPath();
+     m_configPM.presetURL += "/resources/presets";
+   }
+   else if (pvalue == 1) //User preset folder has been chosen
+     m_UserPackFolder = true;
 }
 
-//-- Announce -----------------------------------------------------------------
-// Receive announcements from XBMC
-//-----------------------------------------------------------------------------
-extern "C" void ADDON_Announce(const char *flag, const char *sender, const char *message, const void *data)
+void CAddonVisualizationProjectM::ChooseUserPresetFolder(std::string pvalue)
 {
+  if (m_UserPackFolder)
+  {
+    pvalue.erase(pvalue.length()-1,1);  //Remove "/" from the end
+    m_configPM.presetURL = pvalue;
+  }
 }
+    
+ADDONCREATOR(CAddonVisualizationProjectM); // Don't touch this!

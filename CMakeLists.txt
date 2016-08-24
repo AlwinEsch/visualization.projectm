@@ -7,6 +7,8 @@ if(PACKAGE_CONFIG_PATH)
   set(ENV{PKG_CONFIG_PATH} ${PACKAGE_CONFIG_PATH})
 endif()
 
+set(USE_KODI_API_LEVEL 2)
+
 find_package(Kodi REQUIRED)
 find_package(OpenGL REQUIRED)
 
@@ -25,7 +27,8 @@ set(INCLUDES ${OpenGL_INCLUDE_DIR}
              ${KODI_INCLUDE_DIR}
              ${PROJECTM_INCLUDE_DIRS})
 
-set(DEPLIBS ${OPENGL_LIBRARIES}
+set(DEPLIBS ${kodi-addon-sharedlibrary_LIBRARIES}
+            ${OPENGL_LIBRARIES}
             ${EXTRA_LIBRARIES}
             ${PROJECTM_LIBS}
             ${extra_libs})
